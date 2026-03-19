@@ -24,18 +24,30 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+)
 from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
 HF_SPACE = os.getenv("HF_SPACE_URL", "").rstrip("/")
-API_KEY   = os.getenv("PODCLI_API_KEY", "")
-HEADERS   = {"X-API-Key": API_KEY} if API_KEY else {}
+API_KEY = os.getenv("PODCLI_API_KEY", "")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+HEADERS = {}
+if API_KEY:
+    HEADERS["X-API-Key"] = API_KEY
+if HF_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {HF_TOKEN}"
 
 if not HF_SPACE:
-    print("[podcli-mcp] WARNING: HF_SPACE_URL not set — clip rendering disabled.",
-          file=sys.stderr)
+    print(
+        "[podcli-mcp] WARNING: HF_SPACE_URL not set — clip rendering disabled.",
+        file=sys.stderr,
+    )
 
 mcp = FastMCP("podcast-clipper")
 
@@ -55,7 +67,35 @@ def get_transcript(video_id: str, languages: list[str] = ["es", "en"]) -> dict:
         {"source": "youtube"|"whisper", "segments": [{text, start, duration}, ...]}
     """
     try:
-        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+        yt = YouTubeTranscriptApi()
+        transcript_list = yt.list(video_id)
+
+        # Try to find a transcript in preferred languages
+        transcript = None
+        for lang in languages:
+            try:
+                transcript = transcript_list.find_transcript([lang])
+                break
+            except:
+                continue
+
+        if not transcript:
+            # Try auto-generated
+            try:
+                transcript = transcript_list.find_transcript(["en"])
+            except:
+                pass
+
+        if transcript:
+            fetched = transcript.fetch()
+            # Convert to segments format
+            segments = [
+                {"text": s.text, "start": s.start, "duration": s.duration}
+                for s in fetched
+            ]
+            return {"source": "youtube", "segments": segments}
+
+        return {"source": "unavailable", "segments": [], "hint": "No captions found"}
         return {"source": "youtube", "segments": segments}
     except (TranscriptsDisabled, NoTranscriptFound):
         return {
@@ -64,7 +104,7 @@ def get_transcript(video_id: str, languages: list[str] = ["es", "en"]) -> dict:
             "hint": (
                 f"No captions found for {video_id}. "
                 "Download the audio and call transcribe_audio() instead."
-            )
+            ),
         }
 
 
@@ -86,13 +126,19 @@ def transcribe_audio(video_url: str, start: float = 0, end: float = 300) -> dict
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
 
-    subprocess.run([
-        "yt-dlp",
-        "--download-sections", f"*{start}-{end}",
-        "--js-runtimes", "node",
-        "-o", tmp_path,
-        video_url
-    ], check=True)
+    subprocess.run(
+        [
+            "yt-dlp",
+            "--download-sections",
+            f"*{start}-{end}",
+            "--js-runtimes",
+            "node",
+            "-o",
+            tmp_path,
+            video_url,
+        ],
+        check=True,
+    )
 
     with open(tmp_path, "rb") as f:
         r = httpx.post(
@@ -132,26 +178,38 @@ def create_clip(
         return {"error": "HF_SPACE_URL not configured"}
 
     import uuid
+
     job_id = output_name.replace(" ", "_") or str(uuid.uuid4())[:8]
 
     # Download only the needed segment
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
 
-    subprocess.run([
-        "yt-dlp",
-        "--download-sections", f"*{start}-{end}",
-        "--js-runtimes", "node",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
-        "-o", tmp_path,
-        video_url
-    ], check=True)
+    subprocess.run(
+        [
+            "yt-dlp",
+            "--download-sections",
+            f"*{start}-{end}",
+            "--js-runtimes",
+            "node",
+            "-f",
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
+            "-o",
+            tmp_path,
+            video_url,
+        ],
+        check=True,
+    )
 
     with open(tmp_path, "rb") as f:
         r = httpx.post(
             f"{HF_SPACE}/clip/{job_id}",
-            params={"start": start, "end": end,
-                    "caption_style": caption_style, "crop": crop},
+            params={
+                "start": start,
+                "end": end,
+                "caption_style": caption_style,
+                "crop": crop,
+            },
             files={"file": ("segment.mp4", f, "video/mp4")},
             headers=HEADERS,
             timeout=120,
@@ -182,8 +240,11 @@ def get_clip_status(job_id: str, download: bool = True) -> dict:
             clips_dir.mkdir(exist_ok=True)
             out = clips_dir / f"{job_id}.mp4"
             out.write_bytes(r.content)
-            return {"status": "done", "local_path": str(out),
-                    "size_mb": round(len(r.content) / 1_000_000, 2)}
+            return {
+                "status": "done",
+                "local_path": str(out),
+                "size_mb": round(len(r.content) / 1_000_000, 2),
+            }
         return {"status": "done", "bytes": len(r.content)}
 
     return r.json()
@@ -224,7 +285,9 @@ def batch_create_clips(
             output_name=clip.get("name", ""),
         )
         job_ids.append(r.get("job_id", ""))
-        results.append({"clip": clip.get("name"), "job_id": r.get("job_id"), "submitted": True})
+        results.append(
+            {"clip": clip.get("name"), "job_id": r.get("job_id"), "submitted": True}
+        )
 
     # Poll until all done (max 10 min)
     deadline = time.time() + 600
@@ -233,7 +296,7 @@ def batch_create_clips(
         time.sleep(8)
         for jid in list(pending):
             s = get_clip_status(jid, download=True)
-            if s.get("status") in ("done", ) or "local_path" in s:
+            if s.get("status") in ("done",) or "local_path" in s:
                 pending.discard(jid)
                 for r in results:
                     if r["job_id"] == jid:
@@ -255,10 +318,18 @@ def space_health() -> dict:
     if not HF_SPACE:
         return {"error": "HF_SPACE_URL not configured"}
     try:
-        r = httpx.get(f"{HF_SPACE}/health", timeout=15)
-        return r.json()
+        r = httpx.get(f"{HF_SPACE}/health", timeout=15, headers=HEADERS)
+        if r.headers.get("content-type", "").startswith("application/json"):
+            return r.json()
+        return {
+            "status": "error",
+            "message": "Unexpected response",
+            "text": r.text[:200],
+        }
     except httpx.TimeoutException:
         return {"status": "sleeping", "hint": "Space is waking up, retry in 30s"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 if __name__ == "__main__":

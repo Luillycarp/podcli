@@ -1,4 +1,5 @@
 """FastAPI wrapper — exposes podcli backend as REST API for HF Spaces."""
+
 import os
 import uuid
 import json
@@ -18,9 +19,11 @@ app = FastAPI(title="podcli API", version="1.0.0")
 API_KEY = os.getenv("PODCLI_API_KEY", "")  # set in HF Space Secrets; empty = no auth
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
 def verify_key(key: str = Security(api_key_header)):
     if API_KEY and key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
+
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("/tmp/podcli_output")
@@ -49,14 +52,20 @@ async def transcribe(file: UploadFile, _=Security(verify_key)):
 
     model = os.getenv("WHISPER_MODEL", "base")
     result = subprocess.run(
-        ["python", "-c", f"""
+        [
+            "python",
+            "-c",
+            f"""
 import json, sys
 sys.path.insert(0, 'backend')
 from services.transcription import transcribe_file
 result = transcribe_file('{tmp_path}', model='{model}')
 print(json.dumps(result))
-"""],
-        capture_output=True, text=True, timeout=600
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
     os.unlink(tmp_path)
 
@@ -68,25 +77,46 @@ print(json.dumps(result))
 
 # ── Create Clip ───────────────────────────────────────────────────────────────
 class ClipRequest(BaseModel):
-    start: float                          # seconds
-    end: float                            # seconds
-    caption_style: str = "hormozi"        # hormozi | branded | karaoke | subtle
-    crop: str = "center"                  # center | face
+    start: float  # seconds
+    end: float  # seconds
+    caption_style: str = "hormozi"  # hormozi | branded | karaoke | subtle
+    crop: str = "center"  # center | face
     logo_path: str | None = None
 
 
 @app.post("/clip/{job_id}")
 async def create_clip(
     job_id: str,
-    payload: ClipRequest,
-    background_tasks: BackgroundTasks,
-    file: UploadFile,
+    start: float | None = None,
+    end: float | None = None,
+    caption_style: str = "hormozi",
+    crop: str = "center",
+    logo_path: str | None = None,
+    payload: ClipRequest | None = None,
+    background_tasks: BackgroundTasks = None,
+    file: UploadFile | None = None,
     _=Security(verify_key),
 ):
     """
     Upload the pre-cut segment + render params.
+    Accepts either query params or JSON body.
     Returns immediately with job_id; poll GET /clip/{job_id} for the result.
     """
+    # Use query params if provided, otherwise try body
+    if payload is None:
+        if start is None or end is None:
+            return {"error": "start and end are required"}
+        payload = ClipRequest(
+            start=start,
+            end=end,
+            caption_style=caption_style,
+            crop=crop,
+            logo_path=logo_path,
+        )
+
+    if file is None:
+        return {"error": "file is required"}
+
     suffix = Path(file.filename).suffix or ".mp4"
     input_path = OUTPUT_DIR / f"{job_id}_input{suffix}"
     with open(input_path, "wb") as f:
@@ -102,8 +132,9 @@ def get_clip(job_id: str, _=Security(verify_key)):
     """Returns the rendered MP4 when ready, or status JSON."""
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
     if output_path.exists():
-        return FileResponse(str(output_path), media_type="video/mp4",
-                            filename=f"clip_{job_id}.mp4")
+        return FileResponse(
+            str(output_path), media_type="video/mp4", filename=f"clip_{job_id}.mp4"
+        )
     status = JOBS.get(job_id, "not_found")
     return {"job_id": job_id, "status": status}
 
@@ -120,7 +151,9 @@ def _render(job_id: str, input_path: str, p: ClipRequest):
     output_path = str(OUTPUT_DIR / f"{job_id}.mp4")
     try:
         cmd = [
-            "python", "-c", f"""
+            "python",
+            "-c",
+            f"""
 import sys
 sys.path.insert(0, 'backend')
 from services.video_processor import process_clip
@@ -132,7 +165,7 @@ process_clip(
     caption_style='{p.caption_style}',
     crop='{p.crop}',
 )
-"""
+""",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
@@ -148,4 +181,5 @@ process_clip(
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 7860)))
