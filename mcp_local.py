@@ -59,11 +59,13 @@ mcp = FastMCP("podcast-clipper")
 def _set_status(job_id: str, data: dict):
     (STATUS_DIR / f"{job_id}.json").write_text(json.dumps(data))
 
+
 def _get_status(job_id: str) -> dict:
     p = STATUS_DIR / f"{job_id}.json"
     if p.exists():
         return json.loads(p.read_text())
     return {"status": "not_found"}
+
 
 def _wake_space(retries: int = 3) -> bool:
     """Ping Space; wait up to 60s if sleeping. Returns True if alive."""
@@ -80,15 +82,20 @@ def _wake_space(retries: int = 3) -> bool:
             time.sleep(20)
     return False
 
+
 def _yt_download(url: str, start: float, end: float, out_path: str):
     """Download a YT segment to out_path."""
     subprocess.run(
         [
             "yt-dlp",
-            "--download-sections", f"*{start}-{end}",
-            "--js-runtimes", "node",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
-            "-o", out_path,
+            "--download-sections",
+            f"*{start}-{end}",
+            "--js-runtimes",
+            "node",
+            "-f",
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
+            "-o",
+            out_path,
             url,
         ],
         check=True,
@@ -143,7 +150,11 @@ def get_transcript(video_id: str, languages: list[str] = ["es", "en"]) -> dict:
                 {"text": s.text, "start": s.start, "duration": s.duration}
                 for s in fetched
             ]
-            result = {"source": "youtube", "language": transcript.language_code, "segments": segments}
+            result = {
+                "source": "youtube",
+                "language": transcript.language_code,
+                "segments": segments,
+            }
             cache_file.write_text(json.dumps(result))
             return result
 
@@ -164,7 +175,9 @@ def get_transcript(video_id: str, languages: list[str] = ["es", "en"]) -> dict:
 
 # ── Tool 2: transcribe_audio (ASYNC) ────────────────────────────────────────────────────────────
 @mcp.tool()
-def transcribe_audio(video_url: str, start: float = 0, end: float = 300, job_id: str = "") -> dict:
+def transcribe_audio(
+    video_url: str, start: float = 0, end: float = 300, job_id: str = ""
+) -> dict:
     """
     Download a segment and transcribe via HF Space Whisper. ASYNC — returns immediately.
     Poll get_clip_status(job_id) until status='done'.
@@ -179,8 +192,11 @@ def transcribe_audio(video_url: str, start: float = 0, end: float = 300, job_id:
         return {"error": "HF_SPACE_URL not configured"}
 
     import uuid
+
     jid = job_id or f"tr_{str(uuid.uuid4())[:8]}"
-    _set_status(jid, {"status": "downloading", "type": "transcription", "started": time.time()})
+    _set_status(
+        jid, {"status": "downloading", "type": "transcription", "started": time.time()}
+    )
 
     def _worker():
         try:
@@ -188,13 +204,18 @@ def transcribe_audio(video_url: str, start: float = 0, end: float = 300, job_id:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                 tmp_path = tmp.name
             _yt_download(video_url, start, end, tmp_path)
-                    # Validate MP4 before upload
-          try:
-                        probe = subprocess.run(["ffprobe", "-v", "error", "-show_format", tmp_path], capture_output=True, text=True, timeout=10)
-                        if probe.returncode != 0 or "moov atom not found" in probe.stderr:
-                                        raise Exception(f"Invalid MP4: {probe.stderr}")
-                                    except subprocess.TimeoutExpired:
-                                                  raise Exception("ffprobe validation timeout")
+            # Validate MP4 before upload
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_format", tmp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if probe.returncode != 0 or "moov atom not found" in probe.stderr:
+                    raise Exception(f"Invalid MP4: {probe.stderr}")
+            except subprocess.TimeoutExpired:
+                raise Exception("ffprobe validation timeout")
             _set_status(jid, {"status": "uploading", "type": "transcription"})
             with open(tmp_path, "rb") as f:
                 r = httpx.post(
@@ -205,12 +226,18 @@ def transcribe_audio(video_url: str, start: float = 0, end: float = 300, job_id:
                 )
             Path(tmp_path).unlink(missing_ok=True)
             r.raise_for_status()
-            _set_status(jid, {"status": "done", "type": "transcription", "result": r.json()})
+            _set_status(
+                jid, {"status": "done", "type": "transcription", "result": r.json()}
+            )
         except Exception as e:
             _set_status(jid, {"status": f"error:{e}", "type": "transcription"})
 
     threading.Thread(target=_worker, daemon=True).start()
-    return {"job_id": jid, "status": "downloading", "hint": "Poll get_clip_status(job_id) for result"}
+    return {
+        "job_id": jid,
+        "status": "downloading",
+        "hint": "Poll get_clip_status(job_id) for result",
+    }
 
 
 # ── Tool 3: create_clip (ASYNC) ──────────────────────────────────────────────────────────────────
@@ -239,13 +266,20 @@ def create_clip(
         return {"error": "HF_SPACE_URL not configured"}
 
     import uuid
+
     job_id = output_name.replace(" ", "_") or str(uuid.uuid4())[:8]
-    _set_status(job_id, {
-        "status": "downloading",
-        "url": video_url, "start": start, "end": end,
-        "caption_style": caption_style, "crop": crop,
-        "started": time.time()
-    })
+    _set_status(
+        job_id,
+        {
+            "status": "downloading",
+            "url": video_url,
+            "start": start,
+            "end": end,
+            "caption_style": caption_style,
+            "crop": crop,
+            "started": time.time(),
+        },
+    )
 
     def _worker():
         try:
@@ -257,6 +291,19 @@ def create_clip(
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                 tmp_path = tmp.name
             _yt_download(video_url, start, end, tmp_path)
+
+            # Validate MP4 before upload
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_format", tmp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if probe.returncode != 0 or "moov atom not found" in probe.stderr:
+                    raise Exception(f"Invalid MP4: {probe.stderr}")
+            except subprocess.TimeoutExpired:
+                raise Exception("ffprobe validation timeout")
 
             # 3. Wait for Space to be awake
             wake_t.join(timeout=60)
@@ -292,11 +339,14 @@ def create_clip(
                     clips_dir.mkdir(exist_ok=True)
                     out = clips_dir / f"{job_id}.mp4"
                     out.write_bytes(sr.content)
-                    _set_status(job_id, {
-                        "status": "done",
-                        "local_path": str(out.resolve()),
-                        "size_mb": round(len(sr.content) / 1_000_000, 2),
-                    })
+                    _set_status(
+                        job_id,
+                        {
+                            "status": "done",
+                            "local_path": str(out.resolve()),
+                            "size_mb": round(len(sr.content) / 1_000_000, 2),
+                        },
+                    )
                     return
                 sj = sr.json()
                 if str(sj.get("status", "")).startswith("error"):
@@ -363,12 +413,14 @@ def batch_create_clips(
             crop=crop,
             output_name=clip.get("name", ""),
         )
-        results.append({"name": clip.get("name"), "job_id": r["job_id"], "status": "submitted"})
+        results.append(
+            {"name": clip.get("name"), "job_id": r["job_id"], "status": "submitted"}
+        )
 
     return {
         "submitted": len(results),
         "jobs": results,
-        "hint": "All downloads running in parallel. Poll get_clip_status(job_id) per clip."
+        "hint": "All downloads running in parallel. Poll get_clip_status(job_id) per clip.",
     }
 
 
