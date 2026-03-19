@@ -4,15 +4,18 @@ Clip generator — orchestrates the full pipeline for creating a short-form clip
 Pipeline: cut segment → crop to 9:16 → render captions → burn captions
           (+ optional gradient overlay + logo) → normalize audio
 """
-
 import os
 import sys
 import tempfile
 import shutil
 from typing import Optional, Callable
 
-_BACKEND_DIR = "/app/backend" if os.path.exists("/app/backend") else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _BACKEND_DIR)
+# FIX: __file__ is not available when run with python -c.
+# Hardcode /app/backend (the fixed path in HF Spaces).
+# Falls back to relative detection for local dev.
+_BACKEND_DIR = "/app/backend" if os.path.isdir("/app/backend") else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
 from services.caption_renderer import render_captions
 from services.video_processor import (
@@ -34,19 +37,16 @@ _FILLER_WORDS = frozenset([
 def _clean_transcript_words(words: list[dict]) -> list[dict]:
     """
     Remove filler words from transcript captions.
-
     - Strips obvious filler words (um, uh, hmm, etc.) so they don't appear in captions.
     - Does NOT shift timestamps — word timing must match the actual audio exactly.
     """
     cleaned = []
     for w in words:
         text = w.get("word", "").strip()
-        # Strip punctuation for matching, but keep original text
         bare = text.lower().strip(".,!?;:-–—'\"")
         if bare in _FILLER_WORDS:
             continue
         cleaned.append(w)
-
     return cleaned
 
 
@@ -89,7 +89,6 @@ def generate_clip(
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
-
     if end_second <= start_second:
         raise ValueError("end_second must be greater than start_second")
 
@@ -97,53 +96,43 @@ def generate_clip(
     if duration > 180:
         raise ValueError(f"Clip too long ({duration:.0f}s). Max 180 seconds for shorts.")
 
-    # Load style config for branded-specific settings
+    # Load style config
     style_config = get_style(caption_style)
 
     # Create temp working directory
     work_dir = tempfile.mkdtemp(prefix="podcast_clip_")
-
     try:
         total_steps = 4 + (1 if outro_path and os.path.exists(str(outro_path)) else 0)
 
-        # Step 1: Cut the segment from the source video
+        # Step 1: Cut the segment
         if progress_callback:
             progress_callback(10, f"Trimming to selected time range (1/{total_steps})")
-
         segment_path = os.path.join(work_dir, "segment.mp4")
         cut_segment(video_path, segment_path, start_second, end_second)
 
         # Step 2: Crop to vertical 9:16
         if progress_callback:
             progress_callback(30, f"Resizing for vertical format (2/{total_steps})")
-
         cropped_path = os.path.join(work_dir, "cropped.mp4")
         crop_to_vertical(
-            segment_path, cropped_path,
+            segment_path,
+            cropped_path,
             strategy=crop_strategy,
             transcript_words=transcript_words,
             clip_start=start_second,
         )
 
-        # Step 3: Generate captions + burn (with optional gradient & logo)
+        # Step 3: Generate captions + burn
         if transcript_words:
             if progress_callback:
                 progress_callback(50, f"Adding {caption_style} captions (3/{total_steps})")
-
-            # Filter words that overlap with our clip's time range
-            # Use overlap check instead of strict containment to avoid
-            # dropping words at boundaries
             clip_words = [
                 w for w in transcript_words
                 if w["end"] > start_second and w["start"] < end_second
             ]
-
-            # Clean filler words and compress large gaps (opt-out via clean_fillers=false)
             if clean_fillers:
                 clip_words = _clean_transcript_words(clip_words)
-
             if clip_words:
-                # Generate ASS subtitle file
                 ass_path = os.path.join(work_dir, "captions.ass")
                 render_captions(
                     words=clip_words,
@@ -151,18 +140,12 @@ def generate_clip(
                     output_path=ass_path,
                     time_offset=start_second,
                 )
-
-                # Burn captions into video
                 if progress_callback:
                     progress_callback(65, f"Rendering captions into video (3/{total_steps})")
-
                 captioned_path = os.path.join(work_dir, "captioned.mp4")
-
-                # Branded style: add gradient overlay + logo
                 use_gradient = style_config.get("gradient_overlay", False)
                 gradient_opacity = style_config.get("gradient_opacity", 0.6)
                 use_logo = style_config.get("logo_support", False) and logo_path
-
                 burn_captions(
                     input_path=cropped_path,
                     ass_path=ass_path,
@@ -182,15 +165,13 @@ def generate_clip(
         # Step 4: Normalize audio
         if progress_callback:
             progress_callback(70, f"Balancing audio levels (4/{total_steps})")
-
         normalized_path = os.path.join(work_dir, "normalized.mp4")
         normalize_audio(captioned_path, normalized_path)
 
-        # Step 5: Append outro (if provided)
+        # Step 5: Append outro (optional)
         if outro_path and os.path.exists(outro_path):
             if progress_callback:
                 progress_callback(85, f"Adding outro ({total_steps}/{total_steps})")
-
             with_outro_path = os.path.join(work_dir, "with_outro.mp4")
             concat_outro(normalized_path, outro_path, with_outro_path)
             final_video_path = with_outro_path
@@ -200,35 +181,27 @@ def generate_clip(
         # Step 6: Move to output
         if progress_callback:
             progress_callback(95, "Saving final clip...")
-
-        # Clean filename
         safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
         safe_title = safe_title.strip().replace(" ", "_")[:50]
         output_filename = f"{safe_title}_short.mp4"
-
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             final_path = os.path.join(output_dir, output_filename)
         else:
             final_path = os.path.join(work_dir, output_filename)
-
         shutil.copy2(final_video_path, final_path)
 
-        # Get file size
         file_size = os.path.getsize(final_path)
         file_size_mb = round(file_size / (1024 * 1024), 2)
 
         if progress_callback:
             progress_callback(100, "Clip complete!")
-
         return {
             "output_path": final_path,
             "duration": round(duration, 2),
             "file_size_mb": file_size_mb,
             "title": title,
         }
-
     finally:
-        # Clean up temp files (but not if output is in work_dir)
         if output_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
