@@ -1,14 +1,12 @@
-# Transcription
-openai-whisper>=20231117
+# Transcription — faster-whisper es más liviano que openai-whisper
+# (no requiere PyTorch, usa CTranslate2)
+faster-whisper>=1.0.0
 
-# Speaker diarization (optional — only needed if you enable local speaker detection)
-# Most users don't need this: Claude handles speaker identification via MCP,
-# and the "Paste Transcript" flow supports Speaker (MM:SS) labels natively.
-# To enable: pip install pyannote.audio speechbrain && set HF_TOKEN in .env
+# Speaker diarization (opcional)
 # pyannote.audio>=3.1.0
 # speechbrain>=1.0.0
 
-# Face detection (optional, for smart cropping)
+# Face detection (opcional, para smart cropping)
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 
