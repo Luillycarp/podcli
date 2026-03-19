@@ -14,22 +14,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Python deps first (better layer caching)
-COPY backend/requirements.txt backend/requirements.txt
+# Copy everything first (avoids checksum/ref errors on HF Spaces cache)
+COPY . .
+
+# Python deps
 RUN pip install --no-cache-dir \
     -r backend/requirements.txt \
     fastapi \
-    uvicorn[standard] \
+    "uvicorn[standard]" \
     python-multipart \
     yt-dlp \
     youtube-transcript-api
 
-# Node deps + build TypeScript
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-COPY . .
-RUN npm run build 2>/dev/null || true  # non-fatal: API works without the web UI build
+# Node deps + build TypeScript (non-fatal if build fails)
+RUN npm ci --omit=dev && npm run build 2>/dev/null || true
 
 # HF Spaces: port 7860, non-root user
 RUN useradd -m -u 1000 appuser \
