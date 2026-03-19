@@ -188,6 +188,13 @@ def transcribe_audio(video_url: str, start: float = 0, end: float = 300, job_id:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                 tmp_path = tmp.name
             _yt_download(video_url, start, end, tmp_path)
+                    # Validate MP4 before upload
+          try:
+                        probe = subprocess.run(["ffprobe", "-v", "error", "-show_format", tmp_path], capture_output=True, text=True, timeout=10)
+                        if probe.returncode != 0 or "moov atom not found" in probe.stderr:
+                                        raise Exception(f"Invalid MP4: {probe.stderr}")
+                                    except subprocess.TimeoutExpired:
+                                                  raise Exception("ffprobe validation timeout")
             _set_status(jid, {"status": "uploading", "type": "transcription"})
             with open(tmp_path, "rb") as f:
                 r = httpx.post(
