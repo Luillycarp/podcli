@@ -1,0 +1,6 @@
+# Install on your laptop (not in the Space)
+httpx>=0.27.0
+mcp[cli]>=1.0.0
+youtube-transcript-api>=0.6.0
+python-dotenv>=1.0.0
+yt-dlp>=2024.1.0

@@ -1,0 +1,20 @@
+name: HF Space Keep-Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # every 10 minutes
+  workflow_dispatch:         # allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping HF Space
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "X-API-Key: ${{ secrets.PODCLI_API_KEY }}" \
+            ${{ secrets.HF_SPACE_URL }}/health)
+          echo "Space responded: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "WARNING: Space returned $STATUS"
+          fi
