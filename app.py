@@ -24,17 +24,16 @@ def verify_key(key: str = Security(api_key_header)):
 # ── Paths & persistent status ────────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("/tmp/podcli_output")
 STATUS_DIR = Path("/tmp/podcli_status")
+BACKEND_DIR = "/app/backend"  # fixed path — __file__ not available in python -c context
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STATUS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _set_job(job_id: str, status: str):
-    """Write job status to disk — survives Space restarts."""
     (STATUS_DIR / f"{job_id}.json").write_text(json.dumps({"job_id": job_id, "status": status}))
 
 
 def _get_job(job_id: str) -> str:
-    """Read job status from disk."""
     p = STATUS_DIR / f"{job_id}.json"
     if p.exists():
         return json.loads(p.read_text()).get("status", "unknown")
@@ -44,16 +43,12 @@ def _get_job(job_id: str) -> str:
 # ── Health ───────────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.2.0"}
+    return {"status": "ok", "version": "1.3.0"}
 
 
 # ── Transcribe (file upload) ───────────────────────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(file: UploadFile, _=Security(verify_key)):
-    """
-    Upload a video/audio file, returns word-level transcript.
-    Use /transcribe_url to avoid uploading from your local machine.
-    """
     suffix = Path(file.filename or "audio").suffix or ".mp4"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(await file.read())
@@ -61,7 +56,7 @@ async def transcribe(file: UploadFile, _=Security(verify_key)):
     return _run_transcription(tmp_path)
 
 
-# ── Transcribe (URL — Space downloads directly, no laptop upload) ──────────────────────────
+# ── Transcribe (URL — Space downloads directly) ──────────────────────────────────────────
 @app.post("/transcribe_url")
 async def transcribe_url(
     video_url: str = Form(...),
@@ -69,15 +64,8 @@ async def transcribe_url(
     end: float = Form(300),
     _=Security(verify_key),
 ):
-    """
-    Download a YouTube segment directly on the Space and transcribe it.
-    Avoids uploading 100-200MB from your laptop network.
-
-    Fields: video_url, start (seconds), end (seconds)
-    """
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
-
     try:
         dl = subprocess.run(
             [
@@ -93,16 +81,14 @@ async def transcribe_url(
             raise HTTPException(500, detail={"error": "yt-dlp failed", "stderr": dl.stderr[-1000:]})
     except subprocess.TimeoutExpired:
         raise HTTPException(504, detail="Download timeout")
-
     return _run_transcription(tmp_path)
 
 
 def _run_transcription(tmp_path: str) -> JSONResponse:
-    """Shared transcription logic for both /transcribe and /transcribe_url."""
     model_size = os.getenv("WHISPER_MODEL", "base")
     script = f"""
-import json, sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
+import json, sys
+sys.path.insert(0, '{BACKEND_DIR}')
 from services.transcription import transcribe_file
 result = transcribe_file('{tmp_path}', model_size='{model_size}', enable_diarization=False)
 print(json.dumps(result))
@@ -113,7 +99,6 @@ print(json.dumps(result))
             capture_output=True, text=True, timeout=600, cwd="/app",
         )
         Path(tmp_path).unlink(missing_ok=True)
-
         if result.returncode != 0:
             raise HTTPException(500, detail={
                 "error": "transcription failed",
@@ -121,7 +106,6 @@ print(json.dumps(result))
                 "stdout": result.stdout[-500:],
             })
         return JSONResponse(content=json.loads(result.stdout))
-
     except subprocess.TimeoutExpired:
         Path(tmp_path).unlink(missing_ok=True)
         raise HTTPException(504, detail="Transcription timeout (>10 min)")
@@ -144,16 +128,10 @@ async def create_clip(
     crop: str = Form("center"),
     _=Security(verify_key),
 ):
-    """
-    Upload pre-cut video segment as multipart/form-data.
-    Form fields: start, end, caption_style, crop + file upload.
-    Returns immediately — poll GET /clip/{job_id} for result.
-    """
     suffix = Path(file.filename or "segment").suffix or ".mp4"
     input_path = OUTPUT_DIR / f"{job_id}_input{suffix}"
     with open(input_path, "wb") as f_out:
         f_out.write(await file.read())
-
     _set_job(job_id, "processing")
     background_tasks.add_task(_render, job_id, str(input_path), start, end, caption_style, crop)
     return {"job_id": job_id, "status": "processing"}
@@ -161,7 +139,6 @@ async def create_clip(
 
 @app.get("/clip/{job_id}")
 def get_clip(job_id: str, _=Security(verify_key)):
-    """Returns MP4 when ready, or {job_id, status} JSON."""
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
     if output_path.exists():
         return FileResponse(str(output_path), media_type="video/mp4",
@@ -182,8 +159,8 @@ def _render(job_id: str, input_path: str,
     output_path = str(OUTPUT_DIR / f"{job_id}.mp4")
     duration = end - start
     script = f"""
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
+import sys
+sys.path.insert(0, '{BACKEND_DIR}')
 from services.video_processor import process_clip
 process_clip(
     input_path='{input_path}',
