@@ -1,4 +1,4 @@
-# podcli — Hugging Face Spaces Docker image
+# podcli — Hugging Face Spaces / Render Docker image
 FROM python:3.11-slim
 
 # System deps: ffmpeg, Node.js 20, build tools
@@ -14,10 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy everything first
-COPY . .
-
-# Python deps
+# -- Python deps (capa separada para cache) --
+COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir \
     -r backend/requirements.txt \
     fastapi \
@@ -26,8 +24,15 @@ RUN pip install --no-cache-dir \
     yt-dlp \
     youtube-transcript-api
 
-# Node deps + build TypeScript (non-fatal)
-RUN npm ci --omit=dev && npm run build 2>/dev/null || true
+# -- Node deps (capa separada para cache) --
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# -- Copiar el resto del proyecto --
+COPY . .
+
+# -- Build TypeScript (non-fatal) --
+RUN npm run build 2>/dev/null || true
 
 # HF Spaces: port 7860, non-root user
 RUN useradd -m -u 1000 appuser \
