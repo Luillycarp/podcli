@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy everything first (avoids checksum/ref errors on HF Spaces cache)
+# Copy everything first
 COPY . .
 
 # Python deps
@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir \
     yt-dlp \
     youtube-transcript-api
 
-# Node deps + build TypeScript (non-fatal if build fails)
+# Node deps + build TypeScript (non-fatal)
 RUN npm ci --omit=dev && npm run build 2>/dev/null || true
 
 # HF Spaces: port 7860, non-root user
