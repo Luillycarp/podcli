@@ -11,7 +11,6 @@ Produces word-level timestamps with speaker labels by:
 2. Running pyannote speaker diarization (if available)
 3. Merging speaker labels onto each word and segment
 """
-
 import os
 import tempfile
 from typing import Optional, Callable
@@ -50,26 +49,40 @@ def transcribe_file(
 
     from faster_whisper import WhisperModel
 
-    # device="auto" uses CUDA if available, falls back to CPU
-    # compute_type="int8" saves RAM on CPU (no quality loss for base/small)
+    # FIX: compute_type must match the actual device at runtime.
+    # If WHISPER_DEVICE=auto and CUDA is available, faster-whisper selects
+    # CUDA but int8 is invalid on GPU — use float16 for GPU, int8 for CPU.
     device = os.getenv("WHISPER_DEVICE", "auto")
-    compute_type = "int8" if device in ("cpu", "auto") else "float16"
+
+    # Detect actual device at runtime
+    _actual_device = device
+    if device == "auto":
+        try:
+            import torch
+            _actual_device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            _actual_device = "cpu"  # no torch = no GPU
+
+    # Set compute_type based on actual device
+    if _actual_device == "cuda":
+        compute_type = "float16"  # GPU: float16 is optimal
+    else:
+        compute_type = "int8"     # CPU: int8 saves RAM, no quality loss
 
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     if progress_callback:
-        progress_callback(10, f"Transcribing with faster-whisper ({model_size})...")
+        progress_callback(10, f"Transcribing with faster-whisper ({model_size}, {compute_type})...")
 
     transcribe_kwargs = dict(
         word_timestamps=True,
-        vad_filter=True,          # skip silence automatically
+        vad_filter=True,  # skip silence automatically
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     if language:
         transcribe_kwargs["language"] = language
 
     segments_gen, info = model.transcribe(file_path, **transcribe_kwargs)
-
     detected_lang = info.language
 
     if progress_callback:
@@ -81,17 +94,15 @@ def transcribe_file(
 
     for seg in segments_gen:
         full_text_parts.append(seg.text.strip())
-
         segments.append(
             {
                 "id": seg.id,
                 "start": round(seg.start, 3),
                 "end": round(seg.end, 3),
                 "text": seg.text.strip(),
-                "speaker": None,  # filled by diarization below
+                "speaker": None,
             }
         )
-
         seg_words = seg.words or []
         if seg_words:
             for w in seg_words:
@@ -143,19 +154,14 @@ def transcribe_file(
                 assign_speakers_to_words,
                 create_speaker_summary,
             )
-
             if progress_callback:
                 progress_callback(55, "Extracting audio for speaker detection...")
-
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 wav_path = tmp.name
-
             try:
                 extract_audio_wav(file_path, wav_path)
-
                 if progress_callback:
                     progress_callback(60, "Running speaker diarization...")
-
                 speaker_segments = run_diarization(
                     wav_path,
                     num_speakers=num_speakers,
@@ -163,25 +169,17 @@ def transcribe_file(
                         progress_callback(60 + int(pct * 0.3), msg) if progress_callback else None
                     ),
                 )
-
                 if speaker_segments:
                     if progress_callback:
                         progress_callback(92, "Assigning speakers to transcript...")
-
                     segments = assign_speakers_to_segments(segments, speaker_segments)
                     words = assign_speakers_to_words(words, speaker_segments)
                     speaker_summary = create_speaker_summary(speaker_segments)
-
                     if progress_callback:
-                        progress_callback(
-                            95,
-                            f"Found {speaker_summary['num_speakers']} speakers",
-                        )
-
+                        progress_callback(95, f"Found {speaker_summary['num_speakers']} speakers")
             finally:
                 if os.path.exists(wav_path):
                     os.unlink(wav_path)
-
         except ImportError as e:
             diarization_warning = f"Speaker detection unavailable: {e}"
             if progress_callback:
@@ -196,9 +194,8 @@ def transcribe_file(
                 progress_callback(90, diarization_warning)
     else:
         diarization_warning = "Speaker detection disabled"
-
-    if progress_callback:
-        progress_callback(100, "Transcription complete")
+        if progress_callback:
+            progress_callback(100, "Transcription complete")
 
     result_data = {
         "transcript": full_transcript,
@@ -209,8 +206,6 @@ def transcribe_file(
         "speakers": speaker_summary,
         "speaker_segments": speaker_segments,
     }
-
     if diarization_warning:
         result_data["diarization_warning"] = diarization_warning
-
     return result_data
