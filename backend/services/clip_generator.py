@@ -11,7 +11,8 @@ import tempfile
 import shutil
 from typing import Optional, Callable
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_BACKEND_DIR = "/app/backend" if os.path.exists("/app/backend") else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _BACKEND_DIR)
 
 from services.caption_renderer import render_captions
 from services.video_processor import (
