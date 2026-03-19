@@ -1,5 +1,6 @@
 """FastAPI wrapper — exposes podcli backend as REST API for HF Spaces."""
 import os
+import sys
 import json
 import traceback
 import subprocess
@@ -12,9 +13,9 @@ from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException, Securit
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 
-app = FastAPI(title="podcli API", version="1.4.0")
+app = FastAPI(title="podcli API", version="1.5.0")
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Auth ─────────────────────────────────────────────────────────────────────
 API_KEY = os.getenv("PODCLI_API_KEY", "")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -23,18 +24,20 @@ def verify_key(key: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-OUTPUT_DIR  = Path("/tmp/podcli_output")
-STATUS_DIR  = Path("/tmp/podcli_status")
-BACKEND_DIR = "/app/backend"
+OUTPUT_DIR = Path("/tmp/podcli_output")
+STATUS_DIR = Path("/tmp/podcli_status")
+BACKEND_DIR = "/app/backend"  # fixed — __file__ not available in python -c
 
-def _ensure_dirs():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+STATUS_DIR.mkdir(parents=True, exist_ok=True)
 
-_ensure_dirs()
+# ── sys.path so imports work from python -c ───────────────────────────────────
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 def _set_job(job_id: str, status: str):
-    _ensure_dirs()
+    # FIX: mkdir on every write — survives /tmp cleanup
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
     (STATUS_DIR / f"{job_id}.json").write_text(json.dumps({"job_id": job_id, "status": status}))
 
 def _get_job(job_id: str) -> str:
@@ -46,16 +49,23 @@ def _get_job(job_id: str) -> str:
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.4.0"}
+    return {"status": "ok", "version": "1.5.0"}
 
 # ── Transcribe (file upload) ──────────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(file: UploadFile, _=Security(verify_key)):
     suffix = Path(file.filename or "audio").suffix or ".mp4"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
-    return _run_transcription(tmp_path)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+        return _run_transcription(tmp_path)
+    except Exception:
+        # FIX: cleanup on any failure path
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 # ── Transcribe URL (Space downloads directly) ─────────────────────────────────
 @app.post("/transcribe_url")
@@ -80,45 +90,29 @@ async def transcribe_url(
             capture_output=True, text=True, timeout=300,
         )
         if dl.returncode != 0:
+            # FIX: cleanup partial download
+            Path(tmp_path).unlink(missing_ok=True)
             raise HTTPException(500, detail={"error": "yt-dlp failed", "stderr": dl.stderr[-1000:]})
         return _run_transcription(tmp_path)
     except subprocess.TimeoutExpired:
-        raise HTTPException(504, detail="Download timeout")
-    finally:
-        # Always clean up temp file
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
+        raise HTTPException(504, detail="Download timeout")
 
 def _run_transcription(tmp_path: str) -> JSONResponse:
     model_size = os.getenv("WHISPER_MODEL", "base")
-    script = f"""
-import json, sys
-sys.path.insert(0, '{BACKEND_DIR}')
-from services.transcription import transcribe_file
-result = transcribe_file('{tmp_path}', model_size='{model_size}', enable_diarization=False)
-print(json.dumps(result))
-"""
     try:
-        result = subprocess.run(
-            ["python", "-c", script],
-            capture_output=True, text=True, timeout=600, cwd="/app",
-        )
-        Path(tmp_path).unlink(missing_ok=True)
-        if result.returncode != 0:
-            raise HTTPException(500, detail={
-                "error": "transcription failed",
-                "stderr": result.stderr[-2000:],
-                "stdout": result.stdout[-500:],
-            })
-        return JSONResponse(content=json.loads(result.stdout))
-    except subprocess.TimeoutExpired:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise HTTPException(504, detail="Transcription timeout (>10 min)")
-    except HTTPException:
-        raise
+        # Import directly (sys.path already set above) instead of python -c
+        from services.transcription import transcribe_file
+        result = transcribe_file(tmp_path, model_size=model_size, enable_diarization=False)
+        return JSONResponse(content=result)
     except Exception as e:
+        raise HTTPException(500, detail={
+            "error": str(e),
+            "trace": traceback.format_exc()[-2000:],
+        })
+    finally:
         Path(tmp_path).unlink(missing_ok=True)
-        raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-1000:]})
 
 # ── Create Clip ───────────────────────────────────────────────────────────────
 @app.post("/clip/{job_id}")
@@ -130,19 +124,23 @@ async def create_clip(
     end: float = Form(...),
     caption_style: str = Form("hormozi"),
     crop: str = Form("center"),
-    transcript_json: str = Form("[]"),   # JSON string: [{word, start, end}, ...]
+    transcript_json: str = Form(""),  # FIX: accept transcript as JSON string
     _=Security(verify_key),
 ):
     suffix = Path(file.filename or "segment").suffix or ".mp4"
+    # FIX: ensure output dir exists before writing
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     input_path = OUTPUT_DIR / f"{job_id}_input{suffix}"
     with open(input_path, "wb") as f_out:
         f_out.write(await file.read())
 
     # Parse transcript words if provided
-    try:
-        transcript_words = json.loads(transcript_json)
-    except Exception:
-        transcript_words = []
+    transcript_words = []
+    if transcript_json:
+        try:
+            transcript_words = json.loads(transcript_json)
+        except json.JSONDecodeError:
+            pass
 
     _set_job(job_id, "processing")
     background_tasks.add_task(
@@ -160,6 +158,7 @@ def get_clip(job_id: str, _=Security(verify_key)):
 
 @app.get("/clips")
 def list_clips(_=Security(verify_key)):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     clips = [f.stem for f in OUTPUT_DIR.glob("*.mp4") if "_input" not in f.name]
     return {"clips": clips, "count": len(clips)}
 
@@ -174,44 +173,30 @@ def _render(
     transcript_words: list,
 ):
     output_path = str(OUTPUT_DIR / f"{job_id}.mp4")
-    script = f"""
-import sys, json
-sys.path.insert(0, '{BACKEND_DIR}')
-from services.clip_generator import generate_clip
-
-transcript_words = {json.dumps(transcript_words)}
-
-result = generate_clip(
-    video_path={repr(input_path)},
-    start_second=0,
-    end_second={end - start},
-    caption_style={repr(caption_style)},
-    crop_strategy={repr(crop)},
-    transcript_words=transcript_words if transcript_words else None,
-    title={repr(job_id)},
-    output_dir={repr(str(OUTPUT_DIR))},
-)
-# rename to expected job_id.mp4
-import os, shutil
-expected = os.path.join({repr(str(OUTPUT_DIR))}, {repr(job_id)} + '.mp4')
-if result['output_path'] != expected:
-    shutil.move(result['output_path'], expected)
-print(json.dumps(result))
-"""
     try:
-        result = subprocess.run(
-            ["python", "-c", script],
-            capture_output=True, text=True, timeout=300, cwd="/app",
+        # FIX: import directly — no python -c, no __file__ issue
+        sys.path.insert(0, BACKEND_DIR)
+        from services.clip_generator import generate_clip  # FIX: was process_clip (didn't exist)
+
+        generate_clip(
+            video_path=input_path,
+            start_second=0,
+            end_second=end - start,
+            caption_style=caption_style,
+            crop_strategy=crop,
+            transcript_words=transcript_words if transcript_words else None,
+            title=job_id,
+            output_dir=str(OUTPUT_DIR),
         )
-        if result.returncode != 0:
-            _set_job(job_id, f"error:{result.stderr[-500:]}")
-        else:
-            _set_job(job_id, "done")
-    except subprocess.TimeoutExpired:
-        _set_job(job_id, "error:render timeout")
+        # generate_clip saves as {title}_short.mp4 — rename to job_id.mp4
+        generated = OUTPUT_DIR / f"{job_id}_short.mp4"
+        if generated.exists():
+            generated.rename(output_path)
+        _set_job(job_id, "done")
     except Exception as e:
-        _set_job(job_id, f"error:{e}")
+        _set_job(job_id, f"error:{traceback.format_exc()[-500:]}")
     finally:
+        # FIX: always cleanup input file
         Path(input_path).unlink(missing_ok=True)
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
