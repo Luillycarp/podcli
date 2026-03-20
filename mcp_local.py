@@ -90,17 +90,17 @@ def _yt_download(url: str, start: float, end: float, out_path: str):
             "yt-dlp",
             "--download-sections",
             f"*{start}-{end}",
-            "--js-runtimes",
-            "node",
             "-f",
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
+            "worst[ext=mp4]/mp4",
             "-o",
             out_path,
-            "--verbose",
+            "--no-check-certificate",
+            "--no-part",
             url,
         ],
         capture_output=True,
         text=True,
+        timeout=180,
     )
     if result.returncode != 0:
         print(f"[yt-dlp ERROR] stderr: {result.stderr}", file=sys.stderr)
