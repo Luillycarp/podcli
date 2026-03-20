@@ -85,7 +85,7 @@ def _wake_space(retries: int = 3) -> bool:
 
 def _yt_download(url: str, start: float, end: float, out_path: str):
     """Download a YT segment to out_path."""
-    subprocess.run(
+    result = subprocess.run(
         [
             "yt-dlp",
             "--download-sections",
@@ -96,11 +96,22 @@ def _yt_download(url: str, start: float, end: float, out_path: str):
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
             "-o",
             out_path,
+            "--verbose",
             url,
         ],
-        check=True,
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        print(f"[yt-dlp ERROR] stderr: {result.stderr}", file=sys.stderr)
+        print(f"[yt-dlp ERROR] stdout: {result.stdout}", file=sys.stderr)
+        raise Exception(f"yt-dlp failed: {result.stderr[-500:]}")
+    # Check file size - suspicious if < 100KB
+    import os
+
+    size = os.path.getsize(out_path)
+    if size < 100000:
+        print(f"[yt-dlp WARNING] File too small: {size} bytes", file=sys.stderr)
 
 
 # ── Tool 1: get_transcript ─────────────────────────────────────────────────────────────────
