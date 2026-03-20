@@ -91,7 +91,7 @@ def _yt_download(url: str, start: float, end: float, out_path: str):
             "--download-sections",
             f"*{start}-{end}",
             "-f",
-            "worst[ext=mp4]/mp4",
+            "best[height<=1080][ext=mp4]/mp4",
             "-o",
             out_path,
             "--no-check-certificate",
